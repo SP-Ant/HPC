@@ -1,0 +1,804 @@
+package org.apache.storm.scheduler;
+
+//import org.apache.storm.command.monitor;
+
+import org.apache.storm.generated.WorkerResources;
+import org.apache.storm.scheduler.resource.RAS_Node;
+import org.apache.storm.scheduler.resource.RAS_Nodes;
+import org.apache.storm.shade.com.google.common.collect.Sets;
+
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.Map.Entry;
+
+public class BinPackingRSPScheduler {
+
+
+
+
+    public static TopologyDetails glbtopologyDetailes= null;
+
+    public static  boolean FirstRunScheduling = false;
+
+    public static Double alpha = 0.9;
+
+    public static boolean isBenchMarkeTasksKilled = false;
+
+    public static int percentPinnedOperatorsCapacity = 50; /// the threshold for capacity of  worker nodes before running ACO
+
+    public static  Map <String , Map<Double, Double> > supervisorCapacity = new HashMap<>();
+
+
+    public static  Map <String , ExecutorDetails> executersToSupervisors = new HashMap<>();
+    public static  Map <String , Map<Double, Double> > componentsResources = new HashMap<>();
+    public static  Map <ExecutorDetails, Map<Double, Double> > executersResources = new HashMap<>();
+    public static String topologyID = "";
+    public static String topologyName = "";
+    public static String componentNameMigrated = "";
+    public static Map<ExecutorDetails, WorkerSlot> execToSlotOriginalAssignment = new HashMap<>();
+    public static Map<ExecutorDetails, WorkerSlot> execToSlotAfterRebalance = new HashMap<>();
+    public static Set<ExecutorDetails> topologexecuters = null;
+    public static  Map <String ,LinkedList <ExecutorDetails> > supervisorsExecutersLinkedList = new HashMap<>();
+
+    public static Map<String, List<ExecutorDetails>>   compToExecuters;
+
+
+
+
+
+    public static  void  schedule(Topologies topologies, Cluster cluster) {
+
+        // logger("..Online Scheduling Assignment "  + ".."+ exec +"..."+wslot);
+        String topologyId="";
+        Topologies topologyCount= cluster.getTopologies();
+
+       //boolean a= true; if(a) return;
+
+      //  System.out.println("..Bin Packing.schedule......topologyCount....  " + topologyCount + "..........." );
+        if (!topologyCount.toString().contains("Mytopology")) return;
+     //   System.out.println("..Bin Packing.schedule......after adding....  " + topologyCount + "..........." );
+
+
+
+
+        if (!FirstRunScheduling ) {
+
+
+            Map<String, SupervisorDetails> supervisordetls = cluster.getSupervisors();
+            for (Entry<String, SupervisorDetails> entry : supervisordetls.entrySet()) {
+                String id_supervisor = entry.getKey();
+                SupervisorDetails supdetails = entry.getValue();
+                String supervisorid = supdetails.getId();
+                double totalcpu = supdetails.getTotalCpu();
+                double totalmem = supdetails.getTotalMemory();
+                Map<Double, Double> capacity = new HashMap<>();
+                capacity.put(totalcpu, totalmem);
+                supervisorCapacity.put(id_supervisor, capacity);
+
+
+                LinkedList<ExecutorDetails> linkedlistExecuters = new LinkedList<>();    /// for detecting executers in each bin
+                supervisorsExecutersLinkedList.put(id_supervisor, linkedlistExecuters);
+
+
+               // System.out.println("..Bin Packing.Supervisor......totalcpu....  " + supervisorid + "..........." + totalcpu + "..." + totalmem);
+            }
+        }
+
+
+        List<ExecutorDetails> orderedExecutors=null;
+        for (TopologyDetails topology : cluster.getTopologies()) {
+
+
+
+//            Collection <TopologyDetails> topologydetails= cluster.getTopologies().getTopologies();
+//            for (TopologyDetails td : topologydetails) {
+//                Map<String, List<ExecutorDetails>>   compToExecuters = cluster.getNeedsSchedulingComponentToExecutors( td );
+//                System.out.println("........Schedule....compToExecuters..."+ compToExecuters );
+//            }
+
+
+
+            topologyId = topology.getId().toString();
+            topologyID =  topology.getId().toString();
+
+           // System.out.println("..Bin Packing.schedule2......topologyID....  " + topologyID + "..........." );
+            if (!topologyID.toString().contains("Mytopology")) continue;
+          //  System.out.println("..Bin Packing.schedule3......topologyID....  " + topologyID + "..........." );
+           // System.out.println("..Bin Packing.schedule..........  " + topologyID + "..........." );
+
+           // " MytopologyTest"
+
+            double cpuNeeded = topology.getTotalRequestedCpu();
+            Map<String, Component> topologyComp =  topology.getComponents();
+            Set<ExecutorDetails> topologexecuters =  topology.getExecutors();
+
+
+
+
+
+
+
+            //ExecutorDetails totalexecCpu =topology.getExecutors();
+
+            // System.out.println(".........getTopologyInfoLoggerRstorm......topologyId....  "  + topologyId  + "..totalexecCpu..."+ cpuNeeded);
+            // System.out.println(".........getTopologyInfoLoggerRstorm......topologyComp....  "  + topologyComp  );
+            // System.out.println(".........getTopologyInfoLoggerRstorm......topologexecuters....  "  + topologexecuters  );
+
+
+            //System.out.println("..Bin Packing.schedule..3..  "+ topologyCount);
+            String topoId = topologyId;
+            SchedulerAssignment assignment = cluster.getAssignmentById(topoId);
+            RAS_Nodes nodes;
+            nodes = new RAS_Nodes(cluster);
+
+            Map<String, String> superIdToRack = new HashMap<>();
+            Map<String, String> superIdToHostname = new HashMap<>();
+            Map<String, List<RAS_Node>> hostnameToNodes = new HashMap<>();
+
+
+            for (RAS_Node node: nodes.getNodes()) {
+                String superId = node.getId();
+                //  System.out.println("...RAS......superId....  "  + superId  );
+                String hostName = node.getHostname();
+                //  System.out.println("...RAS......hostName....  "  + hostName  );
+                //String rackId = hostToRack.getOrDefault(hostName, DNSToSwitchMapping.DEFAULT_RACK);
+                superIdToHostname.put(superId, hostName);
+                // superIdToRack.put(superId, rackId);
+                hostnameToNodes.computeIfAbsent(hostName, (hn) -> new ArrayList<>()).add(node);
+                //  rackIdToNodes.computeIfAbsent(rackId, (hn) -> new ArrayList<>()).add(node);
+            }
+
+
+
+
+                 if (topologyID.toString().contains("Mytopology"))
+                 {
+                    // System.out.println("..Bin Packing.Supervisor......topologyID.1...  " + topologyID);
+                     getComponentPageInfo(  topologyID  ,cluster );
+
+                 }
+
+
+
+                // System.out.println("..Bin Packing.Supervisor......executersResources...2.  " + executersResources.size());
+               //  if (executersResources.size() == 0) continue;
+
+
+
+
+
+
+//                 Collection<ExecutorDetails> unassignedExecutors = new HashSet  <>  (cluster.getUnassignedExecutors(glbtopologyDetailes));
+//                 orderedExecutors = orderExecutors(glbtopologyDetailes, unassignedExecutors);
+//                 //System.out.println("..Bin Packing.Supervisor......orderedExecutors....  " + orderedExecutors);
+//                 //System.out.println(".....Executors....executersResources..  " + executersResources);
+
+
+
+           // boolean a= true; if(a) return;
+
+           // System.out.println(".................schedule check Slots........  " );
+            Collection <WorkerSlot>  usedSlots = cluster.getUsedSlots() ;
+            if (usedSlots.size() == 0) return ;
+            //System.out.println(".................schedule check Slots....size....  " + usedSlots.size());
+
+            if (!FirstRunScheduling ) {
+
+
+                //System.out.println(".................Inside real scheduling ........  " );
+               // hamid  List<WorkerSlot>   avilabslots = cluster.getAssignableSlots() ;
+
+
+                List<WorkerSlot>   avilabslots = cluster.getAvailableSlots();
+
+                System.out.println(".................Inside real scheduling ........  " );
+               // System.out.println(".................avilabslots ........  "+ avilabslots );
+                for (WorkerSlot slot : avilabslots) {
+                    cluster.freeSlot(slot);
+                    // System.out.println(".................avilabslots ........  "+ avilabslots );
+
+                }
+
+                isBenchMarkeTasksKilled =true;
+              //  BenchMarkSubmitter benchMarkSubmitter =new BenchMarkSubmitter();
+              //  benchMarkSubmitter.benchMarkKiller();
+              //  cluster.unassign(topologyId);
+
+                //cluster.uns
+
+                //avilabslots = cluster.getAvailableSlots();
+               // System.out.println(".................avilabslots ........  "+ avilabslots );
+
+
+
+               // System.out.println(".................slotes and topology freed ........  " );
+
+
+
+
+                Collection<ExecutorDetails> unassignedExecutors = new HashSet  <>  (cluster.getUnassignedExecutors(glbtopologyDetailes));
+                if (unassignedExecutors.size() ==0) {
+                    System.out.println("..Bin Packing.Supervisor......unassignedExecutors null....  ");
+                    return;
+                }
+                orderedExecutors = orderExecutors(glbtopologyDetailes, unassignedExecutors);
+                System.out.println("..Bin Packing.Supervisor......orderedExecutors....  " + orderedExecutors);
+                //System.out.println(".....Executors....executersResources..  " + executersResources);
+
+
+
+
+
+                Collection <TopologyDetails> topologydetails= cluster.getTopologies().getTopologies();
+                for (TopologyDetails td : topologydetails) {
+                    compToExecuters = cluster.getNeedsSchedulingComponentToExecutors( td );
+                   // System.out.println("........Schedule....compToExecuters..."+ compToExecuters );
+                }
+                System.out.println("........Schedule....assign Executers..."+ compToExecuters );
+                assignExecuters(topologies, cluster, orderedExecutors);
+
+                FirstRunScheduling=true;
+            }
+
+
+
+        }  /// main for loop topologies
+
+    }
+
+
+
+
+
+
+
+    public static  void  assignExecuters(Topologies topologies, Cluster cluster , List<ExecutorDetails> orderedExecutors) {
+
+
+        int cnt=0;
+        execToSlotOriginalAssignment.clear() ;
+        WorkerSlot lastWorkerSlotAcker=null;
+
+
+        for (ExecutorDetails lstexecutersorderItem : orderedExecutors)
+        {
+
+            Double cpuExecuter = 0.0;
+            Double memExecuter = 0.0;
+            ExecutorDetails executerName = null;
+            // execToSlotOriginalAssignment.clear() ;
+
+
+            for (Entry <ExecutorDetails, Map<Double, Double> > entry : executersResources.entrySet())
+            {
+               // System.out.println("..assignExecuters..  executersResources..  " +  executersResources );
+                // executerName = null;
+                Map<Double, Double> resourcesNeeded = null;
+
+                executerName = entry.getKey();
+                resourcesNeeded = entry.getValue();
+
+                //System.out.println("..executerName....  "  +  executerName );
+
+                if (lstexecutersorderItem.toString().equals(executerName.toString()))
+                {
+                    // totalCpu = Double.parseDouble(obj.toString());
+
+
+                    for (Entry <Double, Double> entry1 : resourcesNeeded.entrySet())
+                    {
+                        cpuExecuter =entry1.getKey();
+                        memExecuter =entry1.getValue();
+                    }
+
+
+
+
+                }
+            }
+
+            //System.out.println("..match....  " +  lstexecutersorderItem +"..cpuExecuter.."+cpuExecuter + "..memExecuter.."+ memExecuter);
+           // System.out.println("..supervisorCapacity....  " +  supervisorCapacity );
+
+
+            for ( Entry <String , Map<Double, Double> > entry : supervisorCapacity.entrySet()) {
+                String id_supervisor = "";
+                Double cpuTotalSupervisor =0.0;
+                Double memTotalSupervisor =0.0;
+                Map<Double, Double> resources = null;
+
+                id_supervisor = entry.getKey();
+                resources = entry.getValue();
+
+                for (Entry <Double, Double> entry1 : resources.entrySet())
+                {
+                    cpuTotalSupervisor =entry1.getKey();
+                    memTotalSupervisor =entry1.getValue();
+                }
+
+                // System.out.println("..id_supervisor....  " +  id_supervisor +"..cpuTotalSupervisor.."+cpuTotalSupervisor + "..memTotalSupervisor.."+ memTotalSupervisor);
+
+
+               /// we dedicate only a percentage of capacity of worker nodes for pinned executors and the other is for ACO
+                cpuTotalSupervisor = cpuTotalSupervisor * percentPinnedOperatorsCapacity;
+
+
+                if (  (cpuExecuter < cpuTotalSupervisor)  &&  (  memExecuter < memTotalSupervisor )   )
+                {
+                    cnt++;
+                    String id_supervisorNew  =id_supervisor  + "-" +cnt;
+
+                    executersToSupervisors.put( id_supervisorNew , lstexecutersorderItem );
+                     System.out.println("...Bin packing Assignment..Executer..."  + lstexecutersorderItem +"...To.." + id_supervisorNew);
+                    cpuTotalSupervisor -= cpuExecuter;
+                    memTotalSupervisor -= memExecuter;
+
+                   // System.out.println("...Bin packing Assignment..cpuExecuter."  + cpuExecuter );
+                   // System.out.println("...Bin packing Assignment..memExecuter."  + memExecuter );
+
+
+
+
+
+                    /// we update the resources of supervisors
+                    resources.clear() ;
+                    resources.put(cpuTotalSupervisor, memTotalSupervisor);
+
+                    supervisorCapacity.replace( id_supervisor , resources ) ;
+
+                   // System.out.println("...Bin packing Assignment..supervisorCapacity after update.."  + supervisorCapacity);
+
+                    //supervisorCapacity.put( id_supervisor , resources );
+
+
+                   //  System.out.println("...Bin packing Assignment..Executer.Capacity After assignment.."  + cpuTotalSupervisor +"...To.." + memTotalSupervisor);
+                    // System.out.println(".... resources."  + resources.toString()) ;
+                    // System.out.println(".... supervisorCapacity."  + supervisorCapacity.toString()) ;
+
+                    WorkerSlot wslot=  SupervisorToWslot( cluster,id_supervisor );
+                    lastWorkerSlotAcker = wslot;
+                    execToSlotOriginalAssignment.put( lstexecutersorderItem,  wslot );
+                   // System.out.println("...Bin packing Assignment..execToSlotOriginalAssignment.."  + execToSlotOriginalAssignment );
+
+                    /////// update bin-Excuters
+                    updateSupervisorsExecutersLinkedList(  id_supervisor ,    lstexecutersorderItem );
+                    //System.out.println("......................................................................" );
+
+                    break;
+
+                }
+
+            }
+
+
+
+
+        }
+
+
+
+        // System.out.println("...Bin packing executersToSupervisors..."  + executersToSupervisors );
+
+        //  System.out.println("...Bin packing supervisorsExecutersLinkedList..."  + supervisorsExecutersLinkedList );
+
+
+        Map<WorkerSlot, WorkerResources> slotToResources = new HashMap<>();
+        /// inserting acker executers to assignmet
+
+        ExecutorDetails ackerExecuter =null;
+
+        for (ExecutorDetails topologyexecuters : topologexecuters)
+        {
+            if (topologyexecuters.toString().contains("1, 1") )
+            {
+                execToSlotOriginalAssignment.put( topologyexecuters,  lastWorkerSlotAcker );
+                ackerExecuter = topologyexecuters;
+
+                break;
+            }
+        }
+        /////////////////
+
+
+        /// we update the Reward Matrix for migration
+        /// it consists of supervisors and their free capacity
+        for ( Entry <String , Map<Double, Double> > entry : supervisorCapacity.entrySet()) {
+            String id_supervisor = "";
+            Double cpuTotalSupervisor = 0.0;
+            Double memTotalSupervisor = 0.0;
+            Map<Double, Double> resources = null;
+
+            id_supervisor = entry.getKey();
+            resources = entry.getValue();
+
+            for (Entry <Double, Double> entry1 : resources.entrySet())
+            {
+                cpuTotalSupervisor =entry1.getKey();
+                memTotalSupervisor =entry1.getValue();
+            }
+           // supervisorsRewardFreeCapacity.put ( id_supervisor , cpuTotalSupervisor );
+        }
+
+
+
+
+
+        SchedulerAssignment newAssignment = new SchedulerAssignmentImpl(topologyID, execToSlotOriginalAssignment, slotToResources, null);
+        cluster.assign(newAssignment, true);
+        System.out.println("....................execToSlotOriginalAssignment..............."  + execToSlotOriginalAssignment);
+
+        execToSlotAfterRebalance.putAll( execToSlotOriginalAssignment );
+        System.out.println(".. Bin Packing. assignment is  done. " );
+        // logger("..New Bin Packing. assignment is  done... " );
+
+    }
+
+
+
+
+
+
+
+
+    public static void updateSupervisorsExecutersLinkedList( String id_supervisor ,  ExecutorDetails lstexecutersorderItem ) {
+
+
+        for (Entry  <String ,LinkedList<ExecutorDetails> >  supervisorexecuter : supervisorsExecutersLinkedList.entrySet())
+        {
+            String  idSupervisor = supervisorexecuter.getKey();
+            LinkedList<ExecutorDetails> linkedlistExecuters  = supervisorexecuter.getValue();
+
+            if (id_supervisor.equals( idSupervisor))
+            {
+                linkedlistExecuters.add( lstexecutersorderItem ) ;
+                supervisorsExecutersLinkedList.put( idSupervisor , linkedlistExecuters );
+               // System.out.println("......after  update.............supervisorsExecutersLinkedList.put...................." +supervisorsExecutersLinkedList);
+                break;
+            }
+        }
+
+
+
+    }
+
+
+
+        public static WorkerSlot SupervisorToWslot(Cluster cluster , String id_supervisor)
+    {
+        WorkerSlot result=null;
+
+
+        //WorkerSlot avilabslots = null;
+       // List<WorkerSlot>   avilabslots = cluster.getAssignableSlots();
+        List<WorkerSlot>   avilabslots = cluster.getAvailableSlots();
+       // System.out.println("..SupervisorToWslot. id_supervisor "+ id_supervisor  );
+       // System.out.println("..SupervisorToWslot. avilabslots "+ avilabslots  );
+
+        for (WorkerSlot slot : avilabslots) {
+            // System.out.println("..Ant Colony.scedule. workerslot "+ port  );
+
+             if (slot.toString().contains(id_supervisor) )
+             {
+                 result = slot;
+                // System.out.println("........Return ..slot.... "+ result );
+                 break;
+             }
+
+        }
+        return result;
+
+    }
+
+
+
+
+    public static List<ExecutorDetails> orderExecutors(
+            TopologyDetails td, Collection<ExecutorDetails> unassignedExecutors) {
+        Map<String, Component> componentMap = td.getComponents();
+
+        //td.getTopology().
+
+        List<ExecutorDetails> execsScheduled = new LinkedList<>();
+
+        Map<String, Queue<ExecutorDetails>> compToExecsToSchedule = new HashMap<>();
+        for (Component component : componentMap.values()) {
+
+            //component.getExecs().
+
+            //System.out.println("...Bin Packing......orderExecutors..1.orderExecutors.  "  + component.toString()  );
+            compToExecsToSchedule.put(component.getId(), new LinkedList<ExecutorDetails>());
+            for (ExecutorDetails exec : component.getExecs()) {
+                if (unassignedExecutors.contains(exec)) {
+                    compToExecsToSchedule.get(component.getId()).add(exec);
+                    //System.out.println("...Bin Packing...orderExecutors.2..compToExecsToSchedule...  "  + compToExecsToSchedule.toString()  );
+
+                }
+            }
+        }
+
+       // System.out.println("..........................1..............................  "   );
+
+        Set<Component> sortedComponents = sortComponents(componentMap);
+
+
+        //System.out.println("..........................2..............................  "   );
+        //System.out.println("...Bin Packing...sortedComponents.1..full...  "  + sortedComponents.toString()  );
+       // System.out.println("..........................3..............................  "   );
+        sortedComponents.addAll(componentMap.values());
+       // System.out.println("...Bin Packing...sortedComponents..2.full...  "  + sortedComponents.toString()  );
+
+        for (Component currComp : sortedComponents) {
+            Map<String, Component> neighbors = new HashMap<String, Component>();
+            for (String compId : Sets.union(currComp.getChildren(), currComp.getParents())) {
+                neighbors.put(compId, componentMap.get(compId));
+               // System.out.println("...Bin Packing...neighbors...  "  + neighbors  );
+            }
+            Set<Component> sortedNeighbors = sortNeighbors(currComp, neighbors);
+           // System.out.println("...Bin Packing...sortNeighbors..full.  "  + sortedNeighbors  );
+            Queue<ExecutorDetails> currCompExesToSched = compToExecsToSchedule.get(currComp.getId());
+
+            boolean flag = false;
+            do {
+                flag = false;
+                if (!currCompExesToSched.isEmpty()) {
+                    execsScheduled.add(currCompExesToSched.poll());
+                   // System.out.println("...Bin Packing...execsScheduled.  "  + execsScheduled  );
+                    //System.out.println("...Bin Packing...execsScheduled.  "  + currCompExesToSched  );
+                    flag = true;
+                }
+
+                for (Component neighborComp : sortedNeighbors) {
+                    Queue<ExecutorDetails> neighborCompExesToSched = compToExecsToSchedule.get(neighborComp.getId());
+                    if (!neighborCompExesToSched.isEmpty()) {
+                        execsScheduled.add(neighborCompExesToSched.poll());
+                        flag = true;
+                    }
+                }
+            } while (flag);
+        }
+        return execsScheduled;
+    }
+
+
+
+
+   public static  Set<Component> sortComponents(final Map<String, Component> componentMap) {
+        Set<Component> sortedComponents =
+                new TreeSet<>((o1, o2) -> {
+                    int connections1 = 0;
+                    int connections2 = 0;
+
+                    for (String childId : Sets.union(o1.getChildren(), o1.getParents())) {
+                      //  System.out.println("...Bin Packing...sortComponents..1. o1.getChildren() "  + o1.getChildren()  );
+                      //  System.out.println("...Bin Packing...sortComponents...1 o1.getParents() "  + o1.getParents()  );
+                        connections1 += (componentMap.get(childId).getExecs().size() * o1.getExecs().size());
+
+                      //  System.out.println("...Bin Packing...sortComponents..1. componentMap get(childId)"  + componentMap.get(childId)  );
+                      //  System.out.println("...Bin Packing...sortComponents..1. componentMap.get(childId).getExecs().size()"  + componentMap.get(childId).getExecs().size()  );
+                      //  System.out.println("...Bin Packing...sortComponents..1. o1.getExecs().size()"  + o1.getExecs().size()  );
+
+                       // System.out.println("...Bin Packing...sortComponents..1. connections1 "  + connections1  );
+                    }
+
+                    for (String childId : Sets.union(o2.getChildren(), o2.getParents())) {
+
+                        //System.out.println("...Bin Packing...sortComponents..2. o1.getChildren() "  + o2.getChildren()  );
+                        //System.out.println("...Bin Packing...sortComponents..2 o1.getParents() "  + o2.getParents()  );
+
+                        connections2 += (componentMap.get(childId).getExecs().size() * o2.getExecs().size());
+
+                        //System.out.println("...Bin Packing...sortComponents..2. componentMap get(childId)"  + componentMap.get(childId)  );
+                        //System.out.println("...Bin Packing...sortComponents..2. componentMap.get(childId).getExecs().size()"  + componentMap.get(childId).getExecs().size()  );
+                        //System.out.println("...Bin Packing...sortComponents..2. o1.getExecs().size()"  + o2.getExecs().size()  );
+
+                        //System.out.println("...Bin Packing...sortComponents..2. connections1 "  + connections1  );
+
+                    }
+
+                    if (connections1 > connections2) {
+                        return -1;
+                    } else if (connections1 < connections2) {
+                        return 1;
+                    } else {
+                        return o1.getId().compareTo(o2.getId());
+                    }
+                });
+        sortedComponents.addAll(componentMap.values());
+        return sortedComponents;
+    }
+
+
+    public static Set<Component> sortNeighbors(
+            final Component thisComp, final Map<String, Component> componentMap) {
+        Set<Component> sortedComponents =
+                new TreeSet<>((o1, o2) -> {
+                    int connections1 = o1.getExecs().size() * thisComp.getExecs().size();
+                    int connections2 = o2.getExecs().size() * thisComp.getExecs().size();
+                    if (connections1 < connections2) {
+                        return -1;
+                    } else if (connections1 > connections2) {
+                        return 1;
+                    } else {
+                        return o1.getId().compareTo(o2.getId());
+                    }
+                });
+        sortedComponents.addAll(componentMap.values());
+        return sortedComponents;
+    }
+
+
+
+
+
+
+
+
+    public static  void getComponentPageInfo(String  topologyID , Cluster cluster ) {
+
+        // System.out.println(".....getTopologyCompleteTime::::::topologyID::::" + topologyID);
+        //  Map<String, Map<String, Double>> topologyycompleteTime =  MonitorScheduling.getTopologyExecuteCompleteTime( topologyID);
+
+        String component = "";
+        Map<String, Component> topologyComp = null;
+        //topologexecuters.clear() ;
+        //Set<ExecutorDetails> topologexecuters = null;
+        // Collection<TopologyDetails>  topologyDetail = topologies.getTopologies();
+
+        for (TopologyDetails topology : cluster.getTopologies()) {
+
+            String topologyId = topology.getId().toString();
+            if (topologyId.toString().equals( topologyID )) {
+                double cpuNeeded = topology.getTotalRequestedCpu();
+                topologyComp = topology.getComponents();
+                topologexecuters = topology.getExecutors();
+                break;
+            }else
+            {
+                continue;
+            }
+           // System.out.println(".......topologexecuters...." + topologexecuters);
+
+        }
+
+        String strComp = "";
+        Component comp = null;
+
+        for (Entry<String, Component> entry : topologyComp.entrySet()) {
+
+            strComp = entry.getKey();
+            comp = entry.getValue();
+            List<ExecutorDetails> lstExecs=  comp.getExecs();
+           // System.out.println(".......str....." + strComp + ".......comp....." + comp);
+
+        Map<String, Object> resultGetComponentPage = new HashMap<>();
+        resultGetComponentPage = GetExecuterDetails.getComponentPage(topologyID, strComp);
+         //   resultGetComponentPage = GetExecuterDetails.getComponentPage(topologyID, "counter");
+
+       //  System.out.println(".....Bin Packing.  getComponentPageInfo..  "+ resultGetComponentPage);
+
+        Double totalCpu = 0.0;
+        Double totalMem = 0.0;
+        for (Entry<String, Object> entry1 : resultGetComponentPage.entrySet()) {
+            String str1 = "";
+            Object obj = null;
+            str1 = entry1.getKey();
+            obj = entry1.getValue();
+             // System.out.println(".........str....  " +str1  +"......obj......." + obj);
+            if (str1.equals("requestedCpu"))  totalCpu = Double.parseDouble(obj.toString());
+            if (str1.equals("requestedMemOnHeap")) totalMem = Double.parseDouble(obj.toString());
+
+                        // System.out.println(".........obj..  " +obj  );
+            //  System.out.println("................................................................................  "   );
+        }
+       // System.out.println("...strComp..  " + strComp+"...requestedCpu..  " + totalCpu + "....requestedMemOnHeap..  " + totalMem);
+       // System.out.println(".........requestedMemOnHeap..  " + totalMem);
+
+            int numberofExecutersPerComponent=lstExecs.size();
+
+            for (ExecutorDetails lstexecsAssignResources : lstExecs) {
+               // System.out.println(".....Executors....lstexecsAssignResources..  " + lstexecsAssignResources);
+                Map<Double, Double> capacityExecuters = new HashMap<>();
+                capacityExecuters.put(totalCpu/numberofExecutersPerComponent, totalMem/numberofExecutersPerComponent);
+                executersResources.put (lstexecsAssignResources,capacityExecuters );
+
+            }
+
+          //  System.out.println("..getComponentPageInfo      .executersResources..  " +   executersResources );
+
+        Map<Double, Double> capacity = new HashMap<>();
+        capacity.put(totalCpu, totalMem);
+        componentsResources.put (strComp,capacity );
+
+
+
+
+
+
+
+
+
+
+
+    }
+
+
+
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    public static void logger(String info, String fileName,Boolean append)
+    {
+
+
+        DateFormat dateFormat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
+        Calendar cal = Calendar.getInstance();
+        System.out.println(dateFormat.format(cal.getTime()));
+        String fileLoggerName = fileName;
+
+
+        // logger("..Online Scheduling Assignment " +  dateFormat.format(cal.getTime()));
+        FileWriter fw = null;
+        BufferedWriter bw = null;
+        PrintWriter pw = null;
+        try {
+           // fw = new FileWriter("/home/ali/work/apache-storm-2.1.0/logs/OnlineScheduling.log", true);
+           if (!append ) {
+               fw = new FileWriter("/home/ali/work/apache-storm-2.1.0/logs/" + fileLoggerName + ".log", false);
+           }else
+           {
+               fw = new FileWriter("/home/ali/work/apache-storm-2.1.0/logs/" + fileLoggerName + ".log", true);
+           }
+
+            bw = new BufferedWriter(fw);
+            pw = new PrintWriter(bw);
+
+            pw.println( dateFormat.format(cal.getTime())+"," + info+"/r/n");
+
+            pw.flush();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+    }
+
+
+    public static class ActionEvaluation
+    {
+
+        List<ExecutorDetails>   executerDetails =null;
+        String  sourceSupervisorID =null;
+        String  targetSupervisorID =null;
+        Double costValueBeforMigration =0.0;
+        Double costValueAfterMigration =0.0;
+        Map<ExecutorDetails, WorkerSlot> execToSlotAfterRebalanceEvaluation =new HashMap<>();
+        int epochnumber;
+        Long inputRate = 0L;
+
+
+    }
+
+
+
+
+
+
+
+
+}
