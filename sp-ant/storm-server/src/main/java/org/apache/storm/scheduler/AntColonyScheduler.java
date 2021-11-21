@@ -11,7 +11,7 @@ import java.util.*;
 import java.util.Map.Entry;
 import java.util.logging.FileHandler;
 import java.util.logging.Logger;
-import java.util.logging.SimpleFormatter;
+import java.util.logging.SimpleFormatter;  
 
 public class AntColonyScheduler {
 
