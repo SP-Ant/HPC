@@ -13,7 +13,7 @@
 package org.apache.storm.nimbus;
 
 import java.util.Map;
-import java.util.Set;
+import java.util.Set;   
 
 /**
  * Interface for strategy to recover heartbeats when master gains leadership.
